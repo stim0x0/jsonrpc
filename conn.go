@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"io"
 	"net"
 	"os"
@@ -40,15 +41,19 @@ type Connection struct {
 	log            *zap.SugaredLogger
 }
 
-// NewConnection creates a new Connection with the input io.ReadWriteCloser.
+// NewConnection creates a new Connection
 func NewConnection(network, addr string, _log *zap.SugaredLogger) (*Connection, error) {
+	if _log == nil {
+		_log = zap.NewNop().Sugar()
+	}
+
 	c, err := net.Dial(network, addr)
 	if err != nil {
 		return nil, err
 	}
+
 	_log.Debugw("connected", zap.String("uri", fmt.Sprintf("%s://%s", network, addr)))
 
-	//ctx, cancel := context.WithCancel(context.Background())
 	actionChan := make(chan *action, 200)
 	conn := &Connection{
 		defaultTimeout: 5 * time.Second,
@@ -230,7 +235,7 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 		}
 		return nextID, false
 	}
-	if c.log.Desugar().Core().Enabled(zap.DebugLevel) {
+	if c.log.Desugar().Core().Enabled(zapcore.DebugLevel) {
 		req, _ := json.Marshal(req)
 		c.log.Debugw("sent request", zap.String("request", string(req)))
 	}
@@ -274,7 +279,7 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 		}
 		return false
 	}
-	if c.log.Desugar().Core().Enabled(zap.DebugLevel) {
+	if c.log.Desugar().Core().Enabled(zapcore.DebugLevel) {
 		req, _ := json.Marshal(req)
 		c.log.Debugw("sent notification", zap.String("request", string(req)))
 	}
@@ -297,7 +302,7 @@ func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 		c.log.Debugw("failed to send call response", zap.Error(err))
 		return false
 	}
-	if c.log.Desugar().Core().Enabled(zap.DebugLevel) {
+	if c.log.Desugar().Core().Enabled(zapcore.DebugLevel) {
 		resp, _ := json.Marshal(act.callResp)
 		c.log.Debugw("sent call response", zap.String("response", string(resp)))
 	}
@@ -372,8 +377,8 @@ func (c *Connection) Close() error {
 	return err
 }
 
-// ValidateContext check if context not nil and set default timeout if needed.
-func (c *Connection) ValidateContext(ctx context.Context) context.Context {
+// validateContext check if context not nil and set default timeout if needed.
+func (c *Connection) validateContext(ctx context.Context) context.Context {
 	if ctx == nil {
 		ctx, _ = context.WithTimeout(context.Background(), c.defaultTimeout)
 	}
@@ -396,7 +401,7 @@ func (c *Connection) Notify(ctx context.Context, method string, params ...any) e
 		action:   notificationAction,
 		method:   method,
 		params:   params,
-		ctx:      c.ValidateContext(ctx),
+		ctx:      c.validateContext(ctx),
 		respChan: respChan,
 	}
 	resp := <-respChan
@@ -424,7 +429,7 @@ func (c *Connection) Send(ctx context.Context, method string, params ...any) (<-
 		action:   requestAction,
 		method:   method,
 		params:   params,
-		ctx:      c.ValidateContext(ctx),
+		ctx:      c.validateContext(ctx),
 		idChan:   idChan,
 		respChan: respChan,
 	}
@@ -443,7 +448,7 @@ func (c *Connection) DropPending(id string) {
 
 // Call sends a single JSON-RPC request synchronously.
 func (c *Connection) Call(ctx context.Context, method string, params ...any) (json.RawMessage, error) {
-	ctx = c.ValidateContext(ctx)
+	ctx = c.validateContext(ctx)
 	if c == nil || c.conn == nil {
 		return nil, errors.New("closed or nil connection")
 	}
