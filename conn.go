@@ -347,10 +347,10 @@ func receiver(c *Connection, responseChan chan<- *Response, notificationChan cha
 func (c *Connection) Error() error {
 	var err error = nil
 	switch {
-	case c == nil:
-		err = errors.New("nil connection")
-	case c.conn == nil:
-		err = errors.New("closed connection")
+	//case c == nil:
+	//	err = errors.New("nil connection")
+	//case c.conn == nil:
+	//	err = errors.New("closed connection")
 	case c.conn.failState.Load():
 		err = errors.New("failed connection")
 	}
@@ -359,19 +359,18 @@ func (c *Connection) Error() error {
 
 // Close closes the connection.
 func (c *Connection) Close() error {
-	if c == nil {
-		c.log.Errorw("close on nil connection")
-		return errors.New("close on nil connection")
-	}
-	if c.conn == nil {
-		c.log.Debugw("close on closed connection")
-		return nil
-	}
+	//if c == nil {
+	//	c.log.Errorw("close on nil connection")
+	//	return errors.New("close on nil connection")
+	//}
+	//if c.conn == nil {
+	//	c.log.Debugw("close on closed connection")
+	//	return nil
+	//}
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	err := c.conn.Close()
 	c.wg.Wait()
-	c.conn = nil
 	close(c.actionChan)
 	c.log.Debugw("connection closed")
 	return err
@@ -386,9 +385,9 @@ func (c *Connection) validateContext(ctx context.Context) context.Context {
 }
 
 func (c *Connection) Notify(ctx context.Context, method string, params ...any) error {
-	if c == nil || c.conn == nil {
-		return errors.New("closed or nil connection")
-	}
+	//if c == nil || c.conn == nil {
+	//	return errors.New("closed or nil connection")
+	//}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -413,9 +412,9 @@ func (c *Connection) Notify(ctx context.Context, method string, params ...any) e
 
 // Send sends a single JSON-RPC request asynchronously.
 func (c *Connection) Send(ctx context.Context, method string, params ...any) (<-chan *Response, string, error) {
-	if c == nil || c.conn == nil {
-		return nil, "", errors.New("closed or nil connection")
-	}
+	//if c == nil || c.conn == nil {
+	//	return nil, "", errors.New("closed or nil connection")
+	//}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 
@@ -437,9 +436,9 @@ func (c *Connection) Send(ctx context.Context, method string, params ...any) (<-
 }
 
 func (c *Connection) DropPending(id string) {
-	if c == nil || c.conn == nil {
-		return
-	}
+	//if c == nil || c.conn == nil {
+	//	return
+	//}
 	c.actionChan <- &action{
 		action: dropPendingRequestAction,
 		hId:    id,
@@ -448,10 +447,10 @@ func (c *Connection) DropPending(id string) {
 
 // Call sends a single JSON-RPC request synchronously.
 func (c *Connection) Call(ctx context.Context, method string, params ...any) (json.RawMessage, error) {
+	//if c == nil || c.conn == nil {
+	//	return nil, errors.New("closed or nil connection")
+	//}
 	ctx = c.validateContext(ctx)
-	if c == nil || c.conn == nil {
-		return nil, errors.New("closed or nil connection")
-	}
 	respChan, id, err := c.Send(ctx, method, params...)
 	if err != nil {
 		return nil, err
@@ -468,9 +467,9 @@ func (c *Connection) Call(ctx context.Context, method string, params ...any) (js
 
 // Handle sets notification handler for incoming JSON-RPC notification.
 func (c *Connection) Handle(method string, handler NotificationHandler) error {
-	if c == nil || c.conn == nil {
-		return errors.New("closed or nil connection")
-	}
+	//if c == nil || c.conn == nil {
+	//	return errors.New("closed or nil connection")
+	//}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if err := c.Error(); err != nil {
@@ -486,9 +485,9 @@ func (c *Connection) Handle(method string, handler NotificationHandler) error {
 
 // HandleCall sets call handler for incoming JSON-RPC call.
 func (c *Connection) HandleCall(method string, handler CallHandler) error {
-	if c == nil || c.conn == nil {
-		return errors.New("closed or nil connection")
-	}
+	//if c == nil || c.conn == nil {
+	//	return errors.New("closed or nil connection")
+	//}
 	c.mu.RLock()
 	defer c.mu.RUnlock()
 	if err := c.Error(); err != nil {
