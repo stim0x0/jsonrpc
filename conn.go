@@ -166,7 +166,7 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 				c.log.Debugw("unknown notification", zap.String("method", note.Method))
 				continue
 			}
-			go handler(note.Params)
+			handler(note.Params)
 		case call, ok := <-callChan:
 			if !ok {
 				return
@@ -193,7 +193,7 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 				}
 
 			}(call.Method)
-			go handler(call, callRespChan)
+			handler(call, callRespChan)
 		}
 	}
 }
