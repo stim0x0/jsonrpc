@@ -74,5 +74,3 @@ with raw JSON of notification params as argument.
 Register handler for call, on receiving call with given method handler will be called
 with raw JSON of call params as argument.
 `CallHandler` is defined as: `type CallHandler func(req *Response, resp chan<- *Response)`
-
-
