@@ -5,9 +5,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"io"
+	"log/slog"
 	"net"
 	"os"
 	"strings"
@@ -38,13 +37,13 @@ type Connection struct {
 	mu             sync.RWMutex   // protects outgoing requests & Close operation
 	actionChan     chan *action   // channel for sending requests
 	wg             sync.WaitGroup
-	log            *zap.SugaredLogger
+	log            *slog.Logger
 }
 
 // NewConnection creates a new Connection
-func NewConnection(network, addr string, _log *zap.SugaredLogger) (*Connection, error) {
+func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error) {
 	if _log == nil {
-		_log = zap.NewNop().Sugar()
+		_log = slog.Default()
 	}
 
 	c, err := net.Dial(network, addr)
@@ -52,7 +51,7 @@ func NewConnection(network, addr string, _log *zap.SugaredLogger) (*Connection, 
 		return nil, err
 	}
 
-	_log.Debugw("connected", zap.String("uri", fmt.Sprintf("%s://%s", network, addr)))
+	_log.Debug("connected", slog.String("uri", fmt.Sprintf("%s://%s", network, addr)))
 
 	actionChan := make(chan *action, 200)
 	conn := &Connection{
@@ -145,10 +144,13 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 			if !ok {
 				return
 			}
-			c.log.Debugw("received response", zap.String("id", *res.ID), zap.String("response", string(res.Res)), zap.Error(res.Error()))
+			c.log.Debug("received response",
+				slog.String("id", *res.ID),
+				slog.String("response", string(res.Res)),
+				slog.String("error", res.Error().Error()))
 			req, ok := pendingRequests[*res.ID]
 			if !ok {
-				c.log.Debugw("unknown response", zap.String("id", *res.ID))
+				c.log.Debug("unknown response", slog.String("id", *res.ID))
 				continue
 			}
 			delete(pendingRequests, *res.ID)
@@ -160,10 +162,12 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 			if !ok {
 				return
 			}
-			c.log.Debugw("received notification", zap.String("method", note.Method), zap.String("params", string(note.Params)))
+			c.log.Debug("received notification",
+				slog.String("method", note.Method),
+				slog.String("params", string(note.Params)))
 			handler, ok := notificationHandlers[note.Method]
 			if !ok {
-				c.log.Debugw("unknown notification", zap.String("method", note.Method))
+				c.log.Debug("unknown notification", slog.String("method", note.Method))
 				continue
 			}
 			handler(note.Params)
@@ -171,10 +175,13 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 			if !ok {
 				return
 			}
-			c.log.Debugw("received call", zap.String("id", *call.ID), zap.String("method", call.Method), zap.String("params", string(call.Params)))
+			c.log.Debug("received call",
+				slog.String("id", *call.ID),
+				slog.String("method", call.Method),
+				slog.String("params", string(call.Params)))
 			handler, ok := callHandlers[call.Method]
 			if !ok {
-				c.log.Debugw("unknown call", zap.String("method", call.Method))
+				c.log.Debug("unknown call", slog.String("method", call.Method))
 				continue
 			}
 
@@ -208,7 +215,7 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 		deadline = time.Time{} // no deadline -- use zero time to wait forever
 	}
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
-		c.log.Warnw("fail to set write deadline", zap.Error(err))
+		c.log.Warn("fail to set write deadline", slog.String("error", err.Error()))
 	}
 	nextID++
 	fin := make(chan struct{})
@@ -217,7 +224,9 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 		case <-act.ctx.Done():
 			if act.ctx.Err() == context.Canceled {
 				_ = c.conn.SetWriteDeadline(time.Now())
-				c.log.Debugw("request cancelled", zap.String("method", act.method), zap.String("id", *req.ID))
+				c.log.Debug("request cancelled",
+					slog.String("method", act.method),
+					slog.String("id", *req.ID))
 			}
 		case <-fin:
 		}
@@ -230,14 +239,15 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 		act.respChan <- &Response{ID: req.ID, Err: err}
 		close(act.respChan)
 		if c.conn.failState.Load() {
-			c.log.Debugw("connection moved to failed state")
+			c.log.Debug("connection moved to failed state")
 			return 0, true
 		}
 		return nextID, false
 	}
-	if c.log.Desugar().Core().Enabled(zapcore.DebugLevel) {
+
+	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		req, _ := json.Marshal(req)
-		c.log.Debugw("sent request", zap.String("request", string(req)))
+		c.log.Debug("sent request", slog.String("request", string(req)))
 	}
 	pendingRequests[*req.ID] = req
 	act.idChan <- *req.ID
@@ -255,7 +265,7 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 		deadline = time.Time{} // no deadline -- use zero time to wait forever
 	}
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
-		c.log.Warnw("fail to set write deadline", zap.Error(err))
+		c.log.Warn("fail to set write deadline", slog.String("error", err.Error()))
 	}
 	fin := make(chan struct{})
 	go func() {
@@ -263,7 +273,9 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 		case <-act.ctx.Done():
 			if act.ctx.Err() == context.Canceled {
 				_ = c.conn.SetWriteDeadline(time.Now())
-				c.log.Debugw("request cancelled", zap.String("method", act.method), zap.String("id", *req.ID))
+				c.log.Debug("request cancelled",
+					slog.String("method", act.method),
+					slog.String("id", *req.ID))
 			}
 		case <-fin:
 		}
@@ -274,14 +286,14 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 		act.respChan <- &Response{Err: err}
 		close(act.respChan)
 		if c.conn.failState.Load() {
-			c.log.Debugw("connection moved to failed state")
+			c.log.Debug("connection moved to failed state")
 			return true
 		}
 		return false
 	}
-	if c.log.Desugar().Core().Enabled(zapcore.DebugLevel) {
+	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		req, _ := json.Marshal(req)
-		c.log.Debugw("sent notification", zap.String("request", string(req)))
+		c.log.Debug("sent notification", slog.String("request", string(req)))
 	}
 	act.respChan <- &Response{}
 	close(act.respChan)
@@ -291,20 +303,20 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 	deadline := time.Now().Add(c.defaultTimeout)
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
-		c.log.Warnw("fail to set write deadline", zap.Error(err))
+		c.log.Warn("fail to set write deadline", slog.String("error", err.Error()))
 	}
 	err := enc.Encode(act.callResp)
 	if err != nil {
 		if c.conn.failState.Load() {
-			c.log.Debugw("connection moved to failed state")
+			c.log.Debug("connection moved to failed state")
 			return true
 		}
-		c.log.Debugw("failed to send call response", zap.Error(err))
+		c.log.Debug("failed to send call response", slog.String("error", err.Error()))
 		return false
 	}
-	if c.log.Desugar().Core().Enabled(zapcore.DebugLevel) {
+	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		resp, _ := json.Marshal(act.callResp)
-		c.log.Debugw("sent call response", zap.String("response", string(resp)))
+		c.log.Debug("sent call response", slog.String("response", string(resp)))
 	}
 	return false
 }
@@ -323,11 +335,11 @@ func receiver(c *Connection, responseChan chan<- *Response, notificationChan cha
 		if err := dec.Decode(&resp); err != nil {
 			if errors.Is(err, io.EOF) || (errors.Is(err, os.ErrDeadlineExceeded) && c.conn.failState.Load()) ||
 				strings.Contains(err.Error(), "use of closed network connection") {
-				c.log.Debugw("broken connection", zap.Error(err))
+				c.log.Debug("broken connection", slog.String("error", err.Error()))
 				c.conn.failState.Store(true)
 				return
 			}
-			c.log.Debugw("fail to decode response", zap.Error(err))
+			c.log.Debug("fail to decode response", slog.String("error", err.Error()))
 			continue
 		}
 		if resp.IsNotification() {
@@ -364,7 +376,7 @@ func (c *Connection) Close() error {
 	//	return errors.New("close on nil connection")
 	//}
 	//if c.conn == nil {
-	//	c.log.Debugw("close on closed connection")
+	//	c.log.Debug("close on closed connection")
 	//	return nil
 	//}
 	c.mu.Lock()
@@ -372,7 +384,7 @@ func (c *Connection) Close() error {
 	err := c.conn.Close()
 	c.wg.Wait()
 	close(c.actionChan)
-	c.log.Debugw("connection closed")
+	c.log.Debug("connection closed")
 	return err
 }
 
