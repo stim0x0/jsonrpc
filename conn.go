@@ -147,7 +147,7 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 			c.log.Debug("received response",
 				slog.String("id", *res.ID),
 				slog.String("response", string(res.Res)),
-				slog.String("error", res.Error().Error()))
+				slog.Any("error", res.Error()))
 			req, ok := pendingRequests[*res.ID]
 			if !ok {
 				c.log.Debug("unknown response", slog.String("id", *res.ID))
