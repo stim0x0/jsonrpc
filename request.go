@@ -1,6 +1,8 @@
 package jsonrpc
 
-import "fmt"
+import (
+	"strconv"
+)
 
 // request represent JSON-RPC request.
 type request struct {
@@ -18,8 +20,8 @@ func newRequest(_id uint64, _action *action) *request {
 	var id *string = nil
 
 	if _action.action == requestAction {
-		id = new(string)
-		*id = fmt.Sprintf("%d", _id)
+		_idS := strconv.FormatUint(_id, 10)
+		id = &_idS
 	}
 
 	return &request{

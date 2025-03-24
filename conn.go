@@ -15,12 +15,24 @@ import (
 	"time"
 )
 
-// rawConnection is a wrapper around net.Conn that tracks incomplete writes.
+// rawConnection wraps net.Conn and adds error state.
+// The structure tracks connection status, marking it as problematic when incomplete data write occurs.
 type rawConnection struct {
-	net.Conn
-	failState atomic.Bool
+	net.Conn              // Встроенный интерфейс net.Conn для сетевых операций
+	failState atomic.Bool // Атомарный флаг, указывающий на наличие ошибки при записи
 }
 
+// Write performs data writing to the connection and checks for errors.
+//  1. Delegates the data write operation to the embedded connection c.Conn
+//  2. Tracks a specific situation – an incomplete write when a timeout expires
+//
+// If a timeout error occurs (os.ErrDeadlineExceeded) and only part of the data is written
+// (not all and not zero bytes), then:
+//  1. The connection is marked as problematic using the atomic flag failState
+//  2. The returned error is wrapped with additional context "incomplete write"
+//
+// This mechanism allows tracking the connection status and detecting situations
+// when it is impossible to ensure the integrity of the transmitted data, which is critical for the JSON-RPC protocol.
 func (c *rawConnection) Write(b []byte) (int, error) {
 	n, err := c.Conn.Write(b)
 	if errors.Is(err, os.ErrDeadlineExceeded) && n < len(b) && n != 0 {
@@ -30,17 +42,31 @@ func (c *rawConnection) Write(b []byte) (int, error) {
 	return n, err
 }
 
-// A Connection is a JSON-RPC connection.
+// Connection represents a JSON-RPC client that facilitates sending and receiving messages.
+// It supports both synchronous and asynchronous calls, notifications, and
+// processing incoming notifications/calls from the server.
 type Connection struct {
-	defaultTimeout time.Duration
-	conn           *rawConnection // underlying connection
-	mu             sync.RWMutex   // protects outgoing requests & Close operation
-	actionChan     chan *action   // channel for sending requests
-	wg             sync.WaitGroup
-	log            *slog.Logger
+	defaultTimeout time.Duration  // defaultTimeout default timeout for requests
+	conn           *rawConnection // conn basic net connection with error state
+	mu             sync.RWMutex   // mu locks outgoing requests and Close function
+	actionChan     chan *action   // actionChan channel for sending actions to the broker
+	wg             sync.WaitGroup // wg wait group for goroutines
+	log            *slog.Logger   // log is a logger
 }
 
-// NewConnection creates a new Connection
+// NewConnection creates a new JSON-RPC connection over the specified network protocol and address.
+//
+// Parameters:
+//   - network: The network protocol to use (e.g., "tcp", "unix").
+//   - addr: The address to connect to.
+//   - _log: Optional logger. If nil, the default logger will be used.
+//
+// Returns:
+//   - A new Connection instance ready to send and receive JSON-RPC messages.
+//   - An error if the connection could not be established.
+//
+// The connection establishes communication channels for different message types
+// and starts background goroutines for message processing.
 func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error) {
 	if _log == nil {
 		_log = slog.Default()
@@ -48,12 +74,18 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 
 	c, err := net.Dial(network, addr)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("не удалось установить соединение: %w", err)
 	}
 
 	_log.Debug("connected", slog.String("uri", fmt.Sprintf("%s://%s", network, addr)))
 
-	actionChan := make(chan *action, 200)
+	// Create communication channels for message exchange
+	const chanBufferSize = 200
+	actionChan := make(chan *action, chanBufferSize)
+	notificationChan := make(chan *Response, chanBufferSize)
+	responseChan := make(chan *Response, chanBufferSize)
+	callChan := make(chan *Response, chanBufferSize)
+
 	conn := &Connection{
 		defaultTimeout: 5 * time.Second,
 		conn:           &rawConnection{Conn: c},
@@ -61,9 +93,7 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 		log:            _log,
 	}
 
-	notificationChan := make(chan *Response, 200)
-	responseChan := make(chan *Response, 200)
-	callChan := make(chan *Response, 200)
+	// Start background goroutines for message processing
 	conn.wg.Add(2)
 	go broker(conn, responseChan, notificationChan, callChan)
 	go receiver(conn, responseChan, notificationChan, callChan)
@@ -71,6 +101,28 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 	return conn, nil
 }
 
+// broker is the central goroutine that manages message routing for a JSON-RPC connection.
+// It handles both outgoing and incoming message flows:
+//  1. Outgoing: processes actions from actionChan to send requests, notifications, and server call responses
+//  2. Incoming: processes messages from responseChan, notificationChan, and callChan
+//
+// The broker maintains several state maps:
+//   - pendingRequests: tracks outgoing requests awaiting responses
+//   - pendingCalls: tracks ongoing server calls being processed
+//   - notificationHandlers: registered handlers for incoming notifications
+//   - callHandlers: registered handlers for incoming server calls
+//
+// When the connection closes, the broker ensures proper cleanup by:
+//   - Notifying all pending requests with appropriate errors
+//   - Cancelling any ongoing server calls
+//
+// Parameters:
+//   - c: The Connection instance that owns this broker
+//   - responseChan: Channel for incoming responses to client requests
+//   - notificationChan: Channel for incoming server notifications
+//   - callChan: Channel for incoming server calls
+//
+// The broker terminates when any channel is closed or when a critical connection error occurs.
 func broker(c *Connection, responseChan <-chan *Response, notificationChan <-chan *Response, callChan <-chan *Response) {
 	defer c.wg.Done()
 	var actionChan <-chan *action = c.actionChan
@@ -205,9 +257,23 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 	}
 }
 
-// doSendRequest sends a request to the server and returns the next request ID to use.
-// In case connection became to failed state, it returns second value set to TRUE indicating
-// that the caller should stop event loop.
+// doSendRequest sends a JSON-RPC request to the server and manages the request lifecycle.
+// It creates a request with the provided ID, sets appropriate deadlines, handles context cancellation,
+// and processes the response or error conditions. The function also manages the pending requests map
+// for tracking in-flight requests.
+// Parameters:
+//   - c: The Connection instance that owns this request
+//   - nextID: The ID to use for this request
+//   - act: The action containing request details (method, params, context, etc.)
+//   - enc: JSON encoder to use for writing the request
+//   - pendingRequests: Map of pending requests indexed by ID
+//
+// Returns:
+//   - nextID2: The next available ID for future requests
+//   - failed: Boolean indicating if the connection has entered a failed state
+//
+// If the connection enters a failed state during request sending, the function returns
+// a failed value of true, signaling that the broker should terminate its event loop.
 func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder, pendingRequests map[string]*request) (nextID2 uint64, failed bool) {
 	req := newRequest(nextID, act)
 	deadline, ok := act.ctx.Deadline()
@@ -255,9 +321,17 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 	return nextID, false
 }
 
-// doSendNotification sends a notification to the server.
-// In case connection became to failed state, it returns second value set to TRUE indicating
-// that the caller should stop event loop.
+// doSendNotification sends a JSON-RPC notification to the server.
+// Parameters:
+//   - c: The Connection instance that owns this notification
+//   - act: The action containing notification details (method, params, context)
+//   - enc: JSON encoder to use for writing the notification
+//
+// Returns:
+//   - A boolean indicating if the connection has entered a failed state
+//
+// If the connection enters a failed state during notification sending, the function returns
+// true, signaling that the broker should terminate its event loop. Otherwise, returns false.
 func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 	req := newRequest(0, act)
 	deadline, ok := act.ctx.Deadline()
@@ -300,6 +374,20 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 	return false
 }
 
+// doSendCallResponse sends a JSON-RPC response back to the server for a received call.
+// It sets a write deadline for the operation, encodes the response, and handles any errors
+// that occur during sending.
+//
+// Parameters:
+//   - c: The Connection instance that owns this call response
+//   - act: The action containing call response details
+//   - enc: JSON encoder to use for writing the response
+//
+// Returns:
+//   - A boolean indicating if the connection has entered a failed state
+//
+// If the connection enters a failed state during response sending, the function returns
+// true, signaling that the broker should terminate its event loop. Otherwise, returns false.
 func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 	deadline := time.Now().Add(c.defaultTimeout)
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
@@ -321,12 +409,31 @@ func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 	return false
 }
 
-// receiver receives JSON-RPC responses and server notifications from the connection.
-// And calls from server if any.
+// receiver is a goroutine that processes incoming JSON-RPC messages from the connection.
+//
+// It continuously reads from the connection, decodes messages, and routes them to the appropriate channel
+// based on message type:
+//   - Responses to client requests go to responseChan
+//   - Server notifications go to notificationChan
+//   - Server calls go to callChan
+//
+// The receiver handles error conditions during message reading and decoding:
+//   - For fatal errors (EOF, deadline exceeded with connection failure, closed connection),
+//     it marks the connection as failed and terminates
+//   - For non-fatal decoding errors, it logs the error and continues processing
+//
+// When the receiver terminates (due to connection errors), it properly closes all output channels
+// and decrements the connection's wait group counter.
+// Parameters:
+//   - c: The Connection instance that owns this receiver
+//   - responseChan: Channel for sending received responses to pending client requests
+//   - notificationChan: Channel for sending received server notifications
+//   - callChan: Channel for sending received server calls
 func receiver(c *Connection, responseChan chan<- *Response, notificationChan chan<- *Response, callChan chan<- *Response) {
 	defer c.wg.Done()
 	defer close(notificationChan)
 	defer close(responseChan)
+	defer close(callChan)
 
 	dec := json.NewDecoder(c.conn)
 
@@ -356,6 +463,7 @@ func receiver(c *Connection, responseChan chan<- *Response, notificationChan cha
 	}
 }
 
+// Error returns an error if the connection is in a failed state.
 func (c *Connection) Error() error {
 	var err error = nil
 	switch {
