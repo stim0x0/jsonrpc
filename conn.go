@@ -46,13 +46,17 @@ func (c *rawConnection) Write(b []byte) (int, error) {
 // It supports both synchronous and asynchronous calls, notifications, and
 // processing incoming notifications/calls from the server.
 type Connection struct {
-	defaultTimeout time.Duration  // defaultTimeout default timeout for requests
-	conn           *rawConnection // conn basic net connection with error state
-	mu             sync.RWMutex   // mu locks outgoing requests and Close function
-	actionChan     chan *action   // actionChan channel for sending actions to the broker
-	wg             sync.WaitGroup // wg wait group for goroutines
-	log            *slog.Logger   // log is a logger
+	defaultTimeout time.Duration      // defaultTimeout default timeout for requests
+	conn           *rawConnection     // conn basic net connection with error state
+	mu             sync.RWMutex       // mu locks outgoing requests and Close function
+	actionChan     chan *action       // actionChan channel for sending actions to the broker
+	wg             sync.WaitGroup     // wg wait group for goroutines
+	log            *slog.Logger       // log is a logger
+	ctx            context.Context    // ctx is a context for the connection
+	cancel         context.CancelFunc // cancel is a cancel function for the context
 }
+
+var netDial = net.Dial
 
 // NewConnection creates a new JSON-RPC connection over the specified network protocol and address.
 //
@@ -72,7 +76,7 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 		_log = slog.Default()
 	}
 
-	c, err := net.Dial(network, addr)
+	c, err := netDial(network, addr)
 	if err != nil {
 		return nil, fmt.Errorf("не удалось установить соединение: %w", err)
 	}
@@ -86,16 +90,19 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 	responseChan := make(chan *Response, chanBufferSize)
 	callChan := make(chan *Response, chanBufferSize)
 
+	ctx, cancel := context.WithCancel(context.Background())
 	conn := &Connection{
 		defaultTimeout: 5 * time.Second,
 		conn:           &rawConnection{Conn: c},
 		actionChan:     actionChan,
 		log:            _log,
+		ctx:            ctx,
+		cancel:         cancel,
 	}
 
 	// Start background goroutines for message processing
 	conn.wg.Add(2)
-	go broker(conn, responseChan, notificationChan, callChan)
+	go broker(conn, actionChan, responseChan, notificationChan, callChan)
 	go receiver(conn, responseChan, notificationChan, callChan)
 
 	return conn, nil
@@ -123,27 +130,43 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 //   - callChan: Channel for incoming server calls
 //
 // The broker terminates when any channel is closed or when a critical connection error occurs.
-func broker(c *Connection, responseChan <-chan *Response, notificationChan <-chan *Response, callChan <-chan *Response) {
+func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Response, notificationChan <-chan *Response, callChan <-chan *Response) {
 	defer c.wg.Done()
-	var actionChan <-chan *action = c.actionChan
+	defer c.log.Debug("broker closed")
+	defer c.cancel()
+	//var actionChan <-chan *action = c.actionChan
 	enc := json.NewEncoder(c.conn)
 	nextID := uint64(0)
 	pendingRequests := make(map[string]*request)
-	pendingCalls := make(map[string]chan<- struct{}, 0)
+	//pendingCalls := make(map[string]chan<- struct{}, 0)
 	defer func() {
 		for _, req := range pendingRequests {
 			req.res <- &Response{ID: req.ID, Err: c.Error()}
 			close(req.res)
 		}
-		for _, ch := range pendingCalls {
-			close(ch)
+		for act := range actionChan {
+			switch act.action {
+			case requestAction:
+				act.idChan <- "0"
+				act.respChan <- &Response{Err: c.Error()}
+				close(act.respChan)
+			case notificationAction:
+				act.respChan <- &Response{Err: c.Error()}
+				close(act.respChan)
+			default:
+			}
 		}
+		//for _, ch := range pendingCalls {
+		//	close(ch)
+		//}
 	}()
 	notificationHandlers := make(map[string]NotificationHandler)
 	callHandlers := make(map[string]CallHandler)
 
 	for {
 		select {
+		case <-c.ctx.Done():
+			return
 		// send request/notification/call_response or
 		// handle internal incoming actions supposed to operate in current goroutine
 		case act, ok := <-actionChan:
@@ -238,17 +261,17 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 			}
 
 			callRespChan := make(chan *Response)
-			stopChan := make(chan struct{})
-			pendingCalls[call.Method] = stopChan
+			//stopChan := make(chan struct{})
+			//pendingCalls[call.Method] = stopChan
 			go func(method string) {
 				select {
-				case <-stopChan:
+				case <-c.ctx.Done():
 				case resp := <-callRespChan:
 					c.actionChan <- &action{
 						action:   responseAction,
 						callResp: resp,
 					}
-					delete(pendingCalls, method)
+					//delete(pendingCalls, method)
 				}
 
 			}(call.Method)
@@ -276,6 +299,7 @@ func broker(c *Connection, responseChan <-chan *Response, notificationChan <-cha
 // a failed value of true, signaling that the broker should terminate its event loop.
 func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder, pendingRequests map[string]*request) (nextID2 uint64, failed bool) {
 	req := newRequest(nextID, act)
+	nextID++
 	deadline, ok := act.ctx.Deadline()
 	if !ok {
 		deadline = time.Time{} // no deadline -- use zero time to wait forever
@@ -283,7 +307,6 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
 		c.log.Warn("fail to set write deadline", slog.String("error", err.Error()))
 	}
-	nextID++
 	fin := make(chan struct{})
 	go func() {
 		select {
@@ -347,9 +370,8 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 		case <-act.ctx.Done():
 			if act.ctx.Err() == context.Canceled {
 				_ = c.conn.SetWriteDeadline(time.Now())
-				c.log.Debug("request cancelled",
-					slog.String("method", act.method),
-					slog.String("id", *req.ID))
+				c.log.Debug("notification canceled",
+					slog.String("method", act.method))
 			}
 		case <-fin:
 		}
@@ -431,17 +453,21 @@ func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 //   - callChan: Channel for sending received server calls
 func receiver(c *Connection, responseChan chan<- *Response, notificationChan chan<- *Response, callChan chan<- *Response) {
 	defer c.wg.Done()
+	defer c.log.Debug("receiver closed")
 	defer close(notificationChan)
 	defer close(responseChan)
 	defer close(callChan)
+	defer c.cancel()
 
 	dec := json.NewDecoder(c.conn)
 
 	for {
 		var resp Response
 		if err := dec.Decode(&resp); err != nil {
-			if errors.Is(err, io.EOF) || (errors.Is(err, os.ErrDeadlineExceeded) && c.conn.failState.Load()) ||
-				strings.Contains(err.Error(), "use of closed network connection") {
+			if errors.Is(err, io.EOF) ||
+				(errors.Is(err, os.ErrDeadlineExceeded) && c.conn.failState.Load()) ||
+				strings.Contains(err.Error(), "use of closed network connection") ||
+				strings.Contains(err.Error(), "io: read/write on closed pipe") {
 				c.log.Debug("broken connection", slog.String("error", err.Error()))
 				c.conn.failState.Store(true)
 				return
@@ -461,6 +487,7 @@ func receiver(c *Connection, responseChan chan<- *Response, notificationChan cha
 		}
 		responseChan <- &resp
 	}
+	return
 }
 
 // Error returns an error if the connection is in a failed state.
@@ -490,8 +517,8 @@ func (c *Connection) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
 	err := c.conn.Close()
-	c.wg.Wait()
 	close(c.actionChan)
+	c.wg.Wait()
 	c.log.Debug("connection closed")
 	return err
 }

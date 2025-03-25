@@ -1,6 +1,6 @@
 module github.com/kazmanavt/jsonrpc
 
-go 1.19
+go 1.24.1
 
 require github.com/stretchr/testify v1.10.0
 
