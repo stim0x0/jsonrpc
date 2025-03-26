@@ -42,6 +42,21 @@ func NewClient(network, addr string, _log *slog.Logger) (*Connection, error) {
 	return NewConnection(c, _log), nil
 }
 
+// NewConnection creates a new JSON-RPC Connection instance from an existing network connection.
+//
+// It sets up all necessary communication channels, initializes the connection structure,
+// and launches background goroutines for message processing.
+//
+// Parameters:
+//   - c: An established network connection implementing the net.Conn interface
+//   - _log: Logger for connection-related events. If nil, the default logger will be used.
+//
+// Returns:
+//   - A fully initialized Connection ready to send and receive JSON-RPC messages.
+//
+// The connection starts with two background goroutines:
+//   - broker: Handles message distribution and maintains state for requests and handlers
+//   - receiver: Reads and decodes incoming messages from the network connection
 func NewConnection(c net.Conn, _log *slog.Logger) *Connection {
 	// Create communication channels for message exchange
 	const chanBufferSize = 200
