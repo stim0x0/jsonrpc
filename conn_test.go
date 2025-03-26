@@ -72,7 +72,7 @@ func TestNewConnection(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	require.NotNil(t, conn)
 	defer conn.Close()
@@ -85,7 +85,7 @@ func TestNewConnection(t *testing.T) {
 		return nil, expectedErr
 	}
 
-	conn, err = NewConnection("tcp", "localhost:1234", nil)
+	conn, err = NewClient("tcp", "localhost:1234", nil)
 	assert.Error(t, err)
 	assert.Nil(t, conn)
 	assert.Contains(t, err.Error(), expectedErr.Error())
@@ -118,7 +118,7 @@ func TestConnectionClose(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 
 	err = conn.Close()
@@ -140,7 +140,7 @@ func TestConnectionCall(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -186,7 +186,7 @@ func TestConnectionCallError(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -228,7 +228,7 @@ func TestConnectionCallTimeout(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -261,7 +261,7 @@ func TestConnectionNotify(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -297,7 +297,7 @@ func TestConnectionHandle(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -340,7 +340,7 @@ func TestConnectionHandleCall(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -393,7 +393,7 @@ func TestConnectionSendAndDrop(t *testing.T) {
 		return client, nil
 	}
 
-	conn, err := NewConnection("tcp", "localhost:1234", nil)
+	conn, err := NewClient("tcp", "localhost:1234", nil)
 	require.NoError(t, err)
 	defer conn.Close()
 

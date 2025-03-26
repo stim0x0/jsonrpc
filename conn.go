@@ -8,57 +8,13 @@ import (
 	"io"
 	"log/slog"
 	"net"
-	"os"
-	"strings"
 	"sync"
-	"sync/atomic"
 	"time"
 )
 
-// rawConnection wraps net.Conn and adds error state.
-// The structure tracks connection status, marking it as problematic when incomplete data write occurs.
-type rawConnection struct {
-	net.Conn              // Встроенный интерфейс net.Conn для сетевых операций
-	failState atomic.Bool // Атомарный флаг, указывающий на наличие ошибки при записи
-}
-
-// Write performs data writing to the connection and checks for errors.
-//  1. Delegates the data write operation to the embedded connection c.Conn
-//  2. Tracks a specific situation – an incomplete write when a timeout expires
-//
-// If a timeout error occurs (os.ErrDeadlineExceeded) and only part of the data is written
-// (not all and not zero bytes), then:
-//  1. The connection is marked as problematic using the atomic flag failState
-//  2. The returned error is wrapped with additional context "incomplete write"
-//
-// This mechanism allows tracking the connection status and detecting situations
-// when it is impossible to ensure the integrity of the transmitted data, which is critical for the JSON-RPC protocol.
-func (c *rawConnection) Write(b []byte) (int, error) {
-	n, err := c.Conn.Write(b)
-	if errors.Is(err, os.ErrDeadlineExceeded) && n < len(b) && n != 0 {
-		c.failState.Store(true)
-		err = fmt.Errorf("incomplete write: %w", err)
-	}
-	return n, err
-}
-
-// Connection represents a JSON-RPC client that facilitates sending and receiving messages.
-// It supports both synchronous and asynchronous calls, notifications, and
-// processing incoming notifications/calls from the server.
-type Connection struct {
-	defaultTimeout time.Duration      // defaultTimeout default timeout for requests
-	conn           *rawConnection     // conn basic net connection with error state
-	mu             sync.RWMutex       // mu locks outgoing requests and Close function
-	actionChan     chan *action       // actionChan channel for sending actions to the broker
-	wg             sync.WaitGroup     // wg wait group for goroutines
-	log            *slog.Logger       // log is a logger
-	ctx            context.Context    // ctx is a context for the connection
-	cancel         context.CancelFunc // cancel is a cancel function for the context
-}
-
 var netDial = net.Dial
 
-// NewConnection creates a new JSON-RPC connection over the specified network protocol and address.
+// NewClient creates a new JSON-RPC connection over the specified network protocol and address.
 //
 // Parameters:
 //   - network: The network protocol to use (e.g., "tcp", "unix").
@@ -71,7 +27,7 @@ var netDial = net.Dial
 //
 // The connection establishes communication channels for different message types
 // and starts background goroutines for message processing.
-func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error) {
+func NewClient(network, addr string, _log *slog.Logger) (*Connection, error) {
 	if _log == nil {
 		_log = slog.Default()
 	}
@@ -83,6 +39,10 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 
 	_log.Debug("connected", slog.String("uri", fmt.Sprintf("%s://%s", network, addr)))
 
+	return NewConnection(c, _log), nil
+}
+
+func NewConnection(c net.Conn, _log *slog.Logger) *Connection {
 	// Create communication channels for message exchange
 	const chanBufferSize = 200
 	actionChan := make(chan *action, chanBufferSize)
@@ -105,7 +65,21 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 	go broker(conn, actionChan, responseChan, notificationChan, callChan)
 	go receiver(conn, responseChan, notificationChan, callChan)
 
-	return conn, nil
+	return conn
+}
+
+// Connection represents a JSON-RPC client that facilitates sending and receiving messages.
+// It supports both synchronous and asynchronous calls, notifications, and
+// processing incoming notifications/calls from the server.
+type Connection struct {
+	defaultTimeout time.Duration      // defaultTimeout default timeout for requests
+	conn           *rawConnection     // conn basic net connection with error state
+	mu             sync.RWMutex       // mu locks outgoing requests and Close function
+	actionChan     chan *action       // actionChan channel for sending actions to the broker
+	wg             sync.WaitGroup     // wg wait group for goroutines
+	log            *slog.Logger       // log is a logger
+	ctx            context.Context    // ctx is a context for the connection
+	cancel         context.CancelFunc // cancel is a cancel function for the context
 }
 
 // broker is the central goroutine that manages message routing for a JSON-RPC connection.
@@ -132,7 +106,8 @@ func NewConnection(network, addr string, _log *slog.Logger) (*Connection, error)
 // The broker terminates when any channel is closed or when a critical connection error occurs.
 func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Response, notificationChan <-chan *Response, callChan <-chan *Response) {
 	defer c.wg.Done()
-	defer c.log.Debug("broker closed")
+	reason := "unknown"
+	defer func() { c.log.Debug("broker closed", slog.String("reason", reason)) }()
 	defer c.cancel()
 	//var actionChan <-chan *action = c.actionChan
 	enc := json.NewEncoder(c.conn)
@@ -166,11 +141,13 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 	for {
 		select {
 		case <-c.ctx.Done():
+			reason = "context done"
 			return
 		// send request/notification/call_response or
 		// handle internal incoming actions supposed to operate in current goroutine
 		case act, ok := <-actionChan:
 			if !ok {
+				reason = "action channel closed"
 				return
 			}
 			switch act.action {
@@ -195,21 +172,23 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 			case requestAction:
 				// ------------------------------------------
 				// handle outgoing request
-				var failure bool
-				nextID, failure = doSendRequest(c, nextID, act, enc, pendingRequests)
-				if failure {
+				nextID, ok = doSendRequest(c, nextID, act, enc, pendingRequests)
+				if !ok {
+					reason = "failed to send request"
 					return
 				}
 			case notificationAction:
 				// ------------------------------------------
 				// handle outgoing notification
-				if doSendNotification(c, act, enc) {
+				if !doSendNotification(c, act, enc) {
+					reason = "failed to send notification"
 					return
 				}
 			case responseAction:
 				// ------------------------------------------
 				// handle outgoing call response
-				if doSendCallResponse(c, act, enc) {
+				if !doSendCallResponse(c, act, enc) {
+					reason = "failed to send call response"
 					return
 				}
 			}
@@ -217,6 +196,7 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 		// receive request result
 		case res, ok := <-responseChan:
 			if !ok {
+				reason = "response channel closed"
 				return
 			}
 			c.log.Debug("received response",
@@ -235,6 +215,7 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 		// receive server notification
 		case note, ok := <-notificationChan:
 			if !ok {
+				reason = "notification channel closed"
 				return
 			}
 			c.log.Debug("received notification",
@@ -246,8 +227,11 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 				continue
 			}
 			handler(note.Params)
+
+		// receive server call
 		case call, ok := <-callChan:
 			if !ok {
+				reason = "call channel closed"
 				return
 			}
 			c.log.Debug("received call",
@@ -261,8 +245,6 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 			}
 
 			callRespChan := make(chan *Response)
-			//stopChan := make(chan struct{})
-			//pendingCalls[call.Method] = stopChan
 			go func(method string) {
 				select {
 				case <-c.ctx.Done():
@@ -271,9 +253,7 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 						action:   responseAction,
 						callResp: resp,
 					}
-					//delete(pendingCalls, method)
 				}
-
 			}(call.Method)
 			handler(call, callRespChan)
 		}
@@ -293,11 +273,11 @@ func broker(c *Connection, actionChan <-chan *action, responseChan <-chan *Respo
 //
 // Returns:
 //   - nextID2: The next available ID for future requests
-//   - failed: Boolean indicating if the connection has entered a failed state
+//   - ok: Boolean indicating if the connection is ok & doesn't enter a failed state
 //
 // If the connection enters a failed state during request sending, the function returns
-// a failed value of true, signaling that the broker should terminate its event loop.
-func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder, pendingRequests map[string]*request) (nextID2 uint64, failed bool) {
+// an ok value of false, signaling that the broker should terminate its event loop.
+func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder, pendingRequests map[string]*request) (nextID2 uint64, ok bool) {
 	req := newRequest(nextID, act)
 	nextID++
 	deadline, ok := act.ctx.Deadline()
@@ -329,9 +309,9 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 		close(act.respChan)
 		if c.conn.failState.Load() {
 			c.log.Debug("connection moved to failed state")
-			return 0, true
+			return 0, false
 		}
-		return nextID, false
+		return nextID, true
 	}
 
 	if c.log.Enabled(context.Background(), slog.LevelDebug) {
@@ -341,7 +321,7 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 	pendingRequests[*req.ID] = req
 	act.idChan <- *req.ID
 	close(act.idChan)
-	return nextID, false
+	return nextID, true
 }
 
 // doSendNotification sends a JSON-RPC notification to the server.
@@ -351,10 +331,10 @@ func doSendRequest(c *Connection, nextID uint64, act *action, enc *json.Encoder,
 //   - enc: JSON encoder to use for writing the notification
 //
 // Returns:
-//   - A boolean indicating if the connection has entered a failed state
+//   - A boolean indicating if the connection ok & doesn't enter a failed state
 //
 // If the connection enters a failed state during notification sending, the function returns
-// true, signaling that the broker should terminate its event loop. Otherwise, returns false.
+// false, signaling that the broker should terminate its event loop. Otherwise, returns true.
 func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 	req := newRequest(0, act)
 	deadline, ok := act.ctx.Deadline()
@@ -383,9 +363,9 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 		close(act.respChan)
 		if c.conn.failState.Load() {
 			c.log.Debug("connection moved to failed state")
-			return true
+			return false
 		}
-		return false
+		return true
 	}
 	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		req, _ := json.Marshal(req)
@@ -393,7 +373,7 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 	}
 	act.respChan <- &Response{}
 	close(act.respChan)
-	return false
+	return true
 }
 
 // doSendCallResponse sends a JSON-RPC response back to the server for a received call.
@@ -406,10 +386,10 @@ func doSendNotification(c *Connection, act *action, enc *json.Encoder) bool {
 //   - enc: JSON encoder to use for writing the response
 //
 // Returns:
-//   - A boolean indicating if the connection has entered a failed state
+//   - A boolean indicating if the connection is ok & doesn't enter a failed state
 //
 // If the connection enters a failed state during response sending, the function returns
-// true, signaling that the broker should terminate its event loop. Otherwise, returns false.
+// false, signaling that the broker should terminate its event loop. Otherwise, returns true.
 func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 	deadline := time.Now().Add(c.defaultTimeout)
 	if err := c.conn.SetWriteDeadline(deadline); err != nil {
@@ -419,16 +399,16 @@ func doSendCallResponse(c *Connection, act *action, enc *json.Encoder) bool {
 	if err != nil {
 		if c.conn.failState.Load() {
 			c.log.Debug("connection moved to failed state")
-			return true
+			return false
 		}
 		c.log.Debug("failed to send call response", slog.String("error", err.Error()))
-		return false
+		return true
 	}
 	if c.log.Enabled(context.Background(), slog.LevelDebug) {
 		resp, _ := json.Marshal(act.callResp)
 		c.log.Debug("sent call response", slog.String("response", string(resp)))
 	}
-	return false
+	return true
 }
 
 // receiver is a goroutine that processes incoming JSON-RPC messages from the connection.
@@ -463,17 +443,18 @@ func receiver(c *Connection, responseChan chan<- *Response, notificationChan cha
 
 	for {
 		var resp Response
-		if err := dec.Decode(&resp); err != nil {
-			if errors.Is(err, io.EOF) ||
-				(errors.Is(err, os.ErrDeadlineExceeded) && c.conn.failState.Load()) ||
-				strings.Contains(err.Error(), "use of closed network connection") ||
-				strings.Contains(err.Error(), "io: read/write on closed pipe") {
-				c.log.Debug("broken connection", slog.String("error", err.Error()))
-				c.conn.failState.Store(true)
-				return
-			}
-			c.log.Debug("fail to decode response", slog.String("error", err.Error()))
-			continue
+		if err := dec.Decode(&resp); err != nil && !errors.Is(err, io.EOF) {
+			//if errors.Is(err, io.EOF) ||
+			//	(errors.Is(err, os.ErrDeadlineExceeded) && c.conn.failState.Load()) ||
+			//	strings.Contains(err.Error(), "use of closed network connection") ||
+			//	strings.Contains(err.Error(), "io: read/write on closed pipe") {
+			//	c.log.Debug("broken connection", slog.String("error", err.Error()))
+			//	c.conn.failState.Store(true)
+			//	return
+			//}
+			c.conn.failState.Store(true)
+			c.log.Debug("connection problem or fail to decode response", slog.String("error", err.Error()))
+			return
 		}
 		if resp.IsNotification() {
 			// notification
@@ -487,7 +468,6 @@ func receiver(c *Connection, responseChan chan<- *Response, notificationChan cha
 		}
 		responseChan <- &resp
 	}
-	return
 }
 
 // Error returns an error if the connection is in a failed state.
