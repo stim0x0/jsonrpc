@@ -3,7 +3,6 @@ package v1
 import (
 	"context"
 	"encoding/json"
-	"log/slog"
 	"net"
 	"sync"
 	"testing"
@@ -73,25 +72,14 @@ func TestServerConn_CallHandler(t *testing.T) {
 	defer ln.Close()
 
 	// Create a server connection.
-	logger := slog.New(slog.NewTextHandler(nil, nil))
-	srv := NewServerConnection(ln, logger)
+	//logger := slog.New(slog.NewTextHandler(nil, nil))
+	srv := NewServerConnection(ln, nil)
 
 	// Register a call handler that processes the incoming call.
 	// The handler receives (c *ClientConn, id string, params jsonValueType, respChan chan<- *jResponse)
 	// and sends back a response containing the parameter multiplied by 10.
-	err = srv.HandleCall("call.test", func(c *ClientConn, id string, params jsonValueType, respChan chan<- *jResponse) {
-		var input int
-		// Assume the first parameter is an integer in JSON encoding.
-		err := json.Unmarshal([]byte(params), &input)
-		if err != nil {
-			resp := newResponse(&id, nil, err)
-			respChan <- resp
-			return
-		}
-		// Prepare a result.
-		resultJSON, _ := json.Marshal(input * 10)
-		resp := newResponse(&id, jsonValueType(resultJSON), nil)
-		respChan <- resp
+	err = srv.HandleCall("call.test", func(c *ClientConn, val int) (int, error) {
+		return 10 * val, nil
 	})
 	require.NoError(t, err)
 
@@ -133,8 +121,7 @@ func TestServerConn_MultipleClients(t *testing.T) {
 	require.NoError(t, err)
 	defer ln.Close()
 
-	logger := slog.New(slog.NewTextHandler(nil, nil))
-	srv := NewServerConnection(ln, logger)
+	srv := NewServerConnection(ln, nil)
 	defer srv.Close()
 
 	var wg sync.WaitGroup
@@ -142,14 +129,10 @@ func TestServerConn_MultipleClients(t *testing.T) {
 	received := []int{}
 
 	// Register a notification handler that appends received integers.
-	err = srv.HandleNotification("multiclient.notify", func(c *ClientConn, params ...any) {
-		if len(params) > 0 {
-			if num, ok := params[0].(float64); ok {
-				mu.Lock()
-				received = append(received, int(num))
-				mu.Unlock()
-			}
-		}
+	err = srv.HandleNotification("multiclient.notify", func(v int) {
+		mu.Lock()
+		received = append(received, v)
+		mu.Unlock()
 	})
 	require.NoError(t, err)
 
