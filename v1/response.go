@@ -2,21 +2,9 @@ package v1
 
 import (
 	"bytes"
+	"encoding/json"
 	"errors"
 )
-
-func newResponse(id *string, res jsonValueType, err error) *jResponse {
-	resp := jResponse{
-		jRequest: jRequest{
-			Id: []byte(*id),
-		},
-		Res: res,
-	}
-	if err != nil {
-		resp.Err = jsonValueType(`"` + err.Error() + `"`)
-	}
-	return &resp
-}
 
 // jResponse can be JSON-RPC response, JSON-RPC request notification or server call
 type jResponse struct {
@@ -25,15 +13,6 @@ type jResponse struct {
 	// used for requests
 	Res jsonValueType `json:"result,omitempty"` // Res here is raw results from JSON-RPC server.
 	Err jsonValueType `json:"error,omitempty"`
-}
-
-// getErr returns response error if any
-func (r *jResponse) getErr() error {
-	if r.Err != nil {
-		// TODO: improve error handling
-		return errors.New(string(r.Err))
-	}
-	return nil
 }
 
 func (r *jResponse) isCall() bool {
@@ -45,9 +24,42 @@ func (r *jResponse) isNotification() bool {
 	return bytes.Equal(r.Id, []byte("null"))
 }
 
-func (r *jResponse) Error() []byte {
+func (r *jResponse) GetErr() []byte {
 	return r.Err
 }
-func (r *jResponse) Result() []byte {
+func (r *jResponse) GetResult() []byte {
 	return r.Res
+}
+func (r *jResponse) Error() error {
+	if r.Err == nil {
+		return nil
+	}
+
+	var str *string
+	if err := json.Unmarshal(r.Err, &str); err == nil {
+		if str == nil {
+			return nil
+		}
+		return errors.New(*str)
+	}
+	var obj map[string]any
+	if err := json.Unmarshal(r.Err, &obj); err == nil {
+		if err, ok := obj["error"]; ok {
+			if str, ok := err.(string); ok {
+				return errors.New(str)
+			}
+		}
+		if err, ok := obj["message"]; ok {
+			if str, ok := err.(string); ok {
+				return errors.New(str)
+			}
+		}
+		if err, ok := obj["code"]; ok {
+			if str, ok := err.(string); ok {
+				return errors.New(str)
+			}
+		}
+	}
+
+	return errors.New(string(r.Err))
 }

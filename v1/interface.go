@@ -23,8 +23,9 @@ type Connection interface {
 }
 
 type Response interface {
-	Error() []byte
-	Result() []byte
+	GetErr() []byte
+	GetResult() []byte
+	Error() error
 }
 type Server interface {
 	Close() error

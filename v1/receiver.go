@@ -1,7 +1,6 @@
 package v1
 
 import (
-	"bytes"
 	"encoding/json"
 	"log/slog"
 )
@@ -59,9 +58,9 @@ func (c *ClientConn) receiver() {
 			return
 		}
 
-		if resp.Err != nil && bytes.Equal(resp.Err, []byte("null")) {
-			resp.Err = nil
-		}
+		//if resp.Err != nil && bytes.Equal(resp.Err, []byte("null")) {
+		//	resp.Err = nil
+		//}
 		if resp.isNotification() {
 			// notification
 			go c.dispatchNotification(&resp.jRequest)
@@ -124,7 +123,7 @@ func (c *ClientConn) dispatchResponse(resp *jResponse) {
 	l := c.log.With(slog.String("id", string(resp.Id)))
 	l.Debug("response handler called",
 		slog.Any("result", resp.Res),
-		slog.Any("error", resp.Err))
+		slog.Any("error", resp.Error()))
 
 	c.pendingRequestsLock.Lock()
 	defer c.pendingRequestsLock.Unlock()
