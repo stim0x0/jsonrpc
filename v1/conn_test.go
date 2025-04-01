@@ -161,10 +161,10 @@ func TestClientConn_Send(t *testing.T) {
 	select {
 	case resp := <-respChan:
 		assert.NotNil(t, resp)
-		assert.Nil(t, resp.Error())
+		assert.Nil(t, resp.GetErr())
 
 		var result map[string]string
-		err = json.Unmarshal(resp.Result(), &result)
+		err = json.Unmarshal(resp.GetResult(), &result)
 		require.NoError(t, err)
 		assert.Equal(t, "success", result["status"])
 
@@ -254,7 +254,7 @@ func TestClientConn_SendTimeout(t *testing.T) {
 	assert.NotNil(t, resp)
 
 	var result string
-	err = json.Unmarshal(resp.Result(), &result)
+	err = json.Unmarshal(resp.GetResult(), &result)
 	require.NoError(t, err)
 	assert.Equal(t, "success after timeout", result)
 
@@ -297,10 +297,10 @@ func TestClientConn_Call(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, resp)
-	assert.Nil(t, resp.Error())
+	assert.Nil(t, resp.GetErr())
 
 	var result string
-	err = json.Unmarshal(resp.Result(), &result)
+	err = json.Unmarshal(resp.GetResult(), &result)
 	require.NoError(t, err)
 	assert.Equal(t, "call result", result)
 }
@@ -471,7 +471,7 @@ func TestClientConn_LifecycleAndConcurrency(t *testing.T) {
 			}
 
 			var result []interface{}
-			err = json.Unmarshal(resp.Result(), &result)
+			err = json.Unmarshal(resp.GetResult(), &result)
 			if err != nil {
 				t.Errorf("Unmarshal error: %v", err)
 				return

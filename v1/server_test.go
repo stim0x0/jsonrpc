@@ -101,11 +101,11 @@ func TestServerConn_CallHandler(t *testing.T) {
 	require.NotNil(t, resp)
 
 	// Verify that the response has no error.
-	assert.Nil(t, resp.Error())
+	assert.Nil(t, resp.GetErr())
 
 	// Expect the result to be 70 (7*10).
 	var result int
-	err = json.Unmarshal(resp.Result(), &result)
+	err = json.Unmarshal(resp.GetResult(), &result)
 	require.NoError(t, err)
 	assert.Equal(t, 70, result)
 

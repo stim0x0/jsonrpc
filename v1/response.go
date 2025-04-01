@@ -16,7 +16,7 @@ type jResponse struct {
 }
 
 func (r *jResponse) isCall() bool {
-	return !bytes.Equal(r.Id, []byte("null")) && r.Method != ""
+	return !bytes.Equal(r.Id, []byte("null")) && r.Method != "" && r.Params != nil
 }
 
 // IsNotification returns true if response is a notification

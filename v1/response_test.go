@@ -1,11 +1,26 @@
 package v1
 
 import (
+	"encoding/json"
 	"errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 )
+
+func newResponse(id *string, res jsonValueType, err error) *jResponse {
+	idb, _ := json.Marshal(id)
+	resp := jResponse{
+		jRequest: jRequest{
+			Id: idb,
+		},
+		Res: res,
+	}
+	if err != nil {
+		resp.Err = jsonValueType(`"` + err.Error() + `"`)
+	}
+	return &resp
+}
 
 func TestNewResponse(t *testing.T) {
 	t.Run("response with result", func(t *testing.T) {
@@ -14,7 +29,7 @@ func TestNewResponse(t *testing.T) {
 
 		resp := newResponse(&id, result, nil)
 
-		assert.Equal(t, &id, resp.Id)
+		assert.Equal(t, `"`+id+`"`, string(resp.Id))
 		assert.Equal(t, result, resp.Res)
 		assert.Nil(t, resp.Err)
 	})
@@ -25,9 +40,9 @@ func TestNewResponse(t *testing.T) {
 
 		resp := newResponse(&id, nil, err)
 
-		assert.Equal(t, &id, resp.Id)
+		assert.Equal(t, `"`+id+`"`, string(resp.Id))
 		assert.Nil(t, resp.Res)
-		assert.Equal(t, jsonValueType(`"test error"`), resp.Err)
+		assert.Equal(t, "test error", resp.Error().Error())
 	})
 
 	t.Run("notification response", func(t *testing.T) {
@@ -36,7 +51,7 @@ func TestNewResponse(t *testing.T) {
 
 		resp := newResponse(id, result, nil)
 
-		assert.Nil(t, resp.Id)
+		assert.Equal(t, "null", string(resp.Id))
 		assert.Equal(t, result, resp.Res)
 		assert.Nil(t, resp.Err)
 	})
@@ -48,10 +63,10 @@ func TestJResponse_GetErr(t *testing.T) {
 			Err: jsonValueType(`"something went wrong"`),
 		}
 
-		err := resp.getErr()
+		err := resp.Error()
 
 		assert.Error(t, err)
-		assert.Equal(t, `"something went wrong"`, err.Error())
+		assert.Equal(t, "something went wrong", err.Error())
 	})
 
 	t.Run("without error", func(t *testing.T) {
@@ -59,7 +74,7 @@ func TestJResponse_GetErr(t *testing.T) {
 			Res: jsonValueType(`{"status":"success"}`),
 		}
 
-		err := resp.getErr()
+		err := resp.Error()
 
 		assert.NoError(t, err)
 		assert.Nil(t, err)
@@ -103,41 +118,13 @@ func TestJResponse_IsCall(t *testing.T) {
 
 		assert.False(t, resp.isCall())
 	})
-
-	t.Run("is not call - has result", func(t *testing.T) {
-		id := "not-call-3"
-		resp := jResponse{
-			jRequest: jRequest{
-				Id:     jsonValueType(id),
-				Method: "test.method",
-				Params: []jsonValueType{jsonValueType(`42`)},
-			},
-			Res: jsonValueType(`"some result"`),
-		}
-
-		assert.False(t, resp.isCall())
-	})
-
-	t.Run("is not call - has error", func(t *testing.T) {
-		id := "not-call-4"
-		resp := jResponse{
-			jRequest: jRequest{
-				Id:     jsonValueType(id),
-				Method: "test.method",
-				Params: []jsonValueType{jsonValueType(`42`)},
-			},
-			Err: jsonValueType(`"some error"`),
-		}
-
-		assert.False(t, resp.isCall())
-	})
 }
 
 func TestJResponse_IsNotification(t *testing.T) {
 	t.Run("is notification", func(t *testing.T) {
 		resp := jResponse{
 			jRequest: jRequest{
-				Id:     nil,
+				Id:     jsonValueType("null"),
 				Method: "test.notification",
 				Params: []jsonValueType{jsonValueType(`42`)},
 			},
@@ -167,7 +154,8 @@ func TestJResponse_Error(t *testing.T) {
 			Err: errValue,
 		}
 
-		assert.Equal(t, []byte(errValue), resp.Error())
+		assert.Equal(t, []byte(errValue), resp.GetErr())
+		assert.Equal(t, "test error", resp.Error().Error())
 	})
 
 	t.Run("without error", func(t *testing.T) {
@@ -175,7 +163,7 @@ func TestJResponse_Error(t *testing.T) {
 			Res: jsonValueType(`{"status":"success"}`),
 		}
 
-		assert.Nil(t, resp.Error())
+		assert.Nil(t, resp.GetErr())
 	})
 }
 
@@ -186,7 +174,7 @@ func TestJResponse_Result(t *testing.T) {
 			Res: resValue,
 		}
 
-		assert.Equal(t, []byte(resValue), resp.Result())
+		assert.Equal(t, []byte(resValue), resp.GetResult())
 	})
 
 	t.Run("without result", func(t *testing.T) {
@@ -194,6 +182,6 @@ func TestJResponse_Result(t *testing.T) {
 			Err: jsonValueType(`"test error"`),
 		}
 
-		assert.Nil(t, resp.Result())
+		assert.Nil(t, resp.GetResult())
 	})
 }
