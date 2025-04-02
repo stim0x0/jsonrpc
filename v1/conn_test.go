@@ -161,7 +161,7 @@ func TestClientConn_Send(t *testing.T) {
 	select {
 	case resp := <-respChan:
 		assert.NotNil(t, resp)
-		assert.Nil(t, resp.GetErr())
+		assert.Nil(t, resp.Error())
 
 		var result map[string]string
 		err = json.Unmarshal(resp.GetResult(), &result)
@@ -297,7 +297,7 @@ func TestClientConn_Call(t *testing.T) {
 
 	require.NoError(t, err)
 	assert.NotNil(t, resp)
-	assert.Nil(t, resp.GetErr())
+	assert.Nil(t, resp.Error())
 
 	var result string
 	err = json.Unmarshal(resp.GetResult(), &result)
