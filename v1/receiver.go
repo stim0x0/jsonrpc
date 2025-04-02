@@ -29,6 +29,13 @@ func (c *ClientConn) receiver() {
 	defer c.wg.Done()
 	defer c.log.Debug("receiver closed")
 	defer c.cancel()
+	defer func() {
+		// close all pending requests
+		c.pendingRequestsLock.Lock()
+		for _, respChan := range c.pendingRequests {
+			respChan <- &jResponse{Err: []byte(`"connection closed"`)}
+		}
+	}()
 	c.log.Debug("receiver started")
 
 	dec := json.NewDecoder(c.conn)
