@@ -1,4 +1,4 @@
-module github.com/kazmanavt/jsonrpc
+module github.com/kazmanavt/jsonrpc/v2
 
 go 1.24.1
 
