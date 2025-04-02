@@ -1,4 +1,4 @@
-package v1
+package jrpc1
 
 import (
 	"encoding/json"
@@ -8,7 +8,7 @@ import (
 	"runtime"
 )
 
-func newCallHandler(_fn any) (*callHandler, error) {
+func newNotificationHandler(_fn any) (*notificationHandler, error) {
 	fnType := reflect.TypeOf(_fn)
 	if fnType.Kind() != reflect.Func {
 		return nil, errors.New("not a function")
@@ -17,8 +17,8 @@ func newCallHandler(_fn any) (*callHandler, error) {
 	fn := reflect.ValueOf(_fn)
 	name := runtime.FuncForPC(fn.Pointer()).Name()
 
-	if fnType.NumOut() != 2 || fnType.Out(1) != reflect.TypeOf((*error)(nil)).Elem() {
-		return nil, errors.New(`"` + name + `": call handler must return error`)
+	if fnType.NumOut() != 0 {
+		return nil, errors.New(`"` + name + `": call handler must have no return value or return error`)
 	}
 
 	var isVariadic bool
@@ -51,33 +51,27 @@ func newCallHandler(_fn any) (*callHandler, error) {
 		}
 	}
 
-	out := fnType.Out(0)
-	if out.Kind() == reflect.Interface {
-		return nil, errors.New(`"` + name + `": interface type as handler return value not supported`)
-	}
-
-	return &callHandler{
-		name:       name,
-		isVariadic: isVariadic,
-		usesConn:   usesConnection,
-		fn:         fn,
-		ins:        in,
-		out:        out,
+	return &notificationHandler{
+		name:           name,
+		isVariadic:     isVariadic,
+		usesConnection: usesConnection,
+		fn:             fn,
+		ins:            in,
 	}, nil
 }
 
-type callHandler struct {
-	name       string
-	isVariadic bool
-	usesConn   bool
-	fn         reflect.Value
-	ins        []reflect.Type
-	out        reflect.Type
+type notificationHandler struct {
+	name           string
+	isVariadic     bool
+	usesConnection bool
+	fn             reflect.Value
+	ins            []reflect.Type
+	//out        reflect.Type
 }
 
-func (h *callHandler) fillArgs(c *ClientConn, args []jsonValueType) ([]reflect.Value, error) {
+func (h *notificationHandler) fillArgs(c *ClientConn, args []jsonValueType) ([]reflect.Value, error) {
 	var ins []reflect.Value
-	if h.usesConn {
+	if h.usesConnection {
 		ins = append(ins, reflect.ValueOf(c))
 	}
 	for i := range args {
@@ -99,9 +93,9 @@ func (h *callHandler) fillArgs(c *ClientConn, args []jsonValueType) ([]reflect.V
 	return ins, nil
 }
 
-func (h *callHandler) call(c *ClientConn, args []jsonValueType) (jsonValueType, error) {
+func (h *notificationHandler) call(c *ClientConn, args []jsonValueType) error {
 	if len(args) > len(h.ins) && !h.isVariadic {
-		return nil, fmt.Errorf("%q: too many arguments", h.name)
+		return fmt.Errorf("%q: too many arguments", h.name)
 	}
 
 	var vIn []reflect.Value
@@ -112,7 +106,7 @@ func (h *callHandler) call(c *ClientConn, args []jsonValueType) (jsonValueType, 
 		for i := vStart; i < len(args); i++ {
 			argV := reflect.New(vType)
 			if err := json.Unmarshal(args[i], argV.Interface()); err != nil {
-				return nil, fmt.Errorf("%q: argument #%d: %w", h.name, i, err)
+				return fmt.Errorf("%q: argument #%d: %w", h.name, i, err)
 			}
 			vIn = append(vIn, argV.Elem())
 		}
@@ -121,20 +115,12 @@ func (h *callHandler) call(c *ClientConn, args []jsonValueType) (jsonValueType, 
 
 	ins, err := h.fillArgs(c, args)
 	if err != nil {
-		return nil, err
+		return err
 	}
 
 	ins = append(ins, vIn...)
 
-	out := h.fn.Call(ins)
-	if !out[1].IsNil() {
-		return nil, out[1].Interface().(error)
-	}
+	h.fn.Call(ins)
 
-	resJSON, err := json.Marshal(out[0].Interface())
-	if err != nil {
-		return nil, fmt.Errorf("%q: marshal result: %w", h.name, err)
-	}
-
-	return resJSON, nil
+	return nil
 }
