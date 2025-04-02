@@ -160,6 +160,9 @@ func (c *ClientConn) Close() error {
 
 func (c *ClientConn) Notify(ctx context.Context, method string, params ...any) error {
 	data := bytes.NewBufferString(`{"id":null,"method":"` + method + `","params":`)
+	if params == nil {
+		params = make([]any, 0)
+	}
 	if err := json.NewEncoder(data).Encode(params); err != nil {
 		return fmt.Errorf("failed to encode params: %w", err)
 	}
@@ -172,6 +175,9 @@ func (c *ClientConn) Notify(ctx context.Context, method string, params ...any) e
 func (c *ClientConn) Send(ctx context.Context, method string, params ...any) (<-chan Response, error) {
 	id := <-c.reqId
 	data := bytes.NewBufferString(`{"id":"` + id + `","method":"` + method + `","params":`)
+	if params == nil {
+		params = make([]any, 0)
+	}
 	if err := json.NewEncoder(data).Encode(params); err != nil {
 		return nil, fmt.Errorf("failed to encode params: %w", err)
 	}
